@@ -1,4 +1,4 @@
-package com.mpsesa.interview.accounts.core.data;
+package com.mpsesa.interview.accounts.data;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 

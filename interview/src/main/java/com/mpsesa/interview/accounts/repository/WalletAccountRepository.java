@@ -1,6 +1,6 @@
-package com.mpsesa.interview.accounts.core.repository;
+package com.mpsesa.interview.accounts.repository;
 
-import com.mpsesa.interview.accounts.core.domain.WalletAccount;
+import com.mpsesa.interview.accounts.domain.WalletAccount;
 import jakarta.persistence.LockModeType;
 import jakarta.persistence.QueryHint;
 import java.util.List;

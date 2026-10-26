@@ -1,4 +1,4 @@
-package com.mpsesa.interview.accounts.core.domain;
+package com.mpsesa.interview.accounts.domain;
 
 public enum WalletAccountStatusEnum {
     PENDING,
