@@ -1,0 +1,63 @@
+# The full stack for scripts/e2e.sh: Postgres, two instances (8081, 8082) and the fake bank (9090).
+# Separate project name, container names and DB port (5433) so it never collides with the dev DB in docker-compose.yaml.
+name: wallet-e2e
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: e2e-db
+    environment:
+      POSTGRES_USER: interview_user
+      POSTGRES_PASSWORD: interview_pass
+      POSTGRES_DB: interview_db
+    command: ["postgres", "-p", "5433"]
+    network_mode: host
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -p 5433 -U interview_user -d interview_db"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  fake-bank:
+    container_name: e2e-fake-bank
+    image: eclipse-temurin:17-jre
+    network_mode: host            # bank <-> instances call each other on localhost ports
+    environment:
+      BANK_CALLBACK_SECRET: e2e-callback-secret
+    volumes:
+      - ./fake-bank/build/libs/fake-bank.jar:/app.jar:ro
+    command: ["java", "-jar", "/app.jar"]
+
+  wallet-1:
+    container_name: e2e-wallet-1
+    image: eclipse-temurin:17-jre
+    network_mode: host
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      PORT: 8081
+      INSTANCE_ID: wallet-1
+      DB_URL: jdbc:postgresql://localhost:5433/interview_db
+      WALLET_USER_API_KEYS: e2e-user-key
+      WALLET_ADMIN_API_KEYS: e2e-admin-key
+      BANK_CALLBACK_SECRET: e2e-callback-secret
+    volumes:
+      - ./build/libs/wallet-service.jar:/app.jar:ro
+    command: ["java", "-jar", "/app.jar"]
+
+  wallet-2:
+    container_name: e2e-wallet-2
+    image: eclipse-temurin:17-jre
+    network_mode: host
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      PORT: 8082
+      INSTANCE_ID: wallet-2
+      DB_URL: jdbc:postgresql://localhost:5433/interview_db
+      WALLET_USER_API_KEYS: e2e-user-key
+      WALLET_ADMIN_API_KEYS: e2e-admin-key
+      BANK_CALLBACK_SECRET: e2e-callback-secret
+    volumes:
+      - ./build/libs/wallet-service.jar:/app.jar:ro
+    command: ["java", "-jar", "/app.jar"]
