@@ -6,6 +6,7 @@ import com.mpsesa.interview.idempotency.IdempotencyService.Result;
 import com.mpsesa.interview.payouts.data.PayoutRequest;
 import com.mpsesa.interview.payouts.data.PayoutView;
 import jakarta.validation.Valid;
+import java.util.concurrent.Callable;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -28,9 +29,9 @@ public class PayoutController {
     }
 
     @PostMapping
-    public ResponseEntity<String> create(@RequestHeader(value = "Idempotency-Key", required = false) String key,
+    public Callable<ResponseEntity<String>> create(@RequestHeader(value = "Idempotency-Key", required = false) String key,
                                          @Valid @RequestBody PayoutRequest req) {
-        return idempotency.execute(key, "POST /payouts", req, () -> new Result(202, service.create(req))).toResponse();
+        return () -> idempotency.execute(key, "POST /payouts", req, () -> new Result(202, service.create(req))).toResponse();
     }
 
     @GetMapping("/{id}")

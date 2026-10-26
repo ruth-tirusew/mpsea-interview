@@ -7,6 +7,7 @@ import com.mpsesa.interview.transfers.data.ReversalRequest;
 import com.mpsesa.interview.transfers.data.ReversalResponse;
 import com.mpsesa.interview.transfers.data.TransferRequest;
 import jakarta.validation.Valid;
+import java.util.concurrent.Callable;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -28,14 +29,15 @@ public class TransferController {
     }
 
     @PostMapping
-    public ResponseEntity<String> transfer(@RequestHeader(value = "Idempotency-Key", required = false) String key,
+    public Callable<ResponseEntity<String>> transfer(@RequestHeader(value = "Idempotency-Key", required = false) String key,
                                            @Valid @RequestBody TransferRequest req) {
-        return idempotency.execute(key, "POST /p2p/transfers", req,
+        return () -> idempotency.execute(key, "POST /p2p/transfers", req,
                 () -> new Result(201, service.transfer(req))).toResponse();
     }
 
     @PostMapping("/{id}/reversal")
-    public ReversalResponse reverse(@PathVariable String id, @Valid @RequestBody(required = false) ReversalRequest req) {
-        return service.reverse(id, req == null ? null : req.reason());
+    public Callable<ReversalResponse> reverse(@PathVariable String id, @Valid @RequestBody(required = false) ReversalRequest req) {
+        String reason = req == null ? null : req.reason();
+        return () -> service.reverse(id, reason);
     }
 }
