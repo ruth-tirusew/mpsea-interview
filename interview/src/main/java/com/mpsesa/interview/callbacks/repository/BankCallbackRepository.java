@@ -8,8 +8,7 @@ import org.springframework.data.repository.query.Param;
 
 public interface BankCallbackRepository extends JpaRepository<BankCallback, String> {
 
-    /** Returns 1 for the first copy of an event, 0 for every duplicate, race-free across instances. */
-    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Modifying(flushAutomatically = true)
     @Query(value = """
             insert into bank_callbacks (event_id, payout_id, status, received_at)
             values (:eventId, :payoutId, :status, now())
