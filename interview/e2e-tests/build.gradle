@@ -1,0 +1,30 @@
+plugins {
+	id 'java'
+}
+
+java {
+	toolchain {
+		languageVersion = JavaLanguageVersion.of(17)
+	}
+}
+
+repositories {
+	mavenCentral()
+}
+
+dependencies {
+	testImplementation platform('org.junit:junit-bom:5.11.4')
+	testImplementation 'org.junit.jupiter:junit-jupiter'
+	testImplementation 'com.fasterxml.jackson.core:jackson-databind:2.18.2'
+	testImplementation 'org.assertj:assertj-core:3.27.3'
+	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+// Needs the stack from scripts/e2e.sh; run via that script (one command).
+tasks.named('test') {
+	useJUnitPlatform()
+	systemProperty 'wallet.urls', System.getProperty('wallet.urls', 'http://localhost:8081,http://localhost:8082')
+	systemProperty 'bank.url', System.getProperty('bank.url', 'http://localhost:9090')
+	outputs.upToDateWhen { false }
+	testLogging { events 'failed'; exceptionFormat 'full' }
+}
