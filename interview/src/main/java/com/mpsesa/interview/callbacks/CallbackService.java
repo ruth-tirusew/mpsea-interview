@@ -27,7 +27,7 @@ public class CallbackService {
         this.locks = locks;
     }
 
-    @Transactional
+    @Transactional(noRollbackFor = ApiException.class)
     public void handle(CallbackRequest req) {
         locks.boundWaits();
         Payout p = payouts.lockById(req.payoutId())

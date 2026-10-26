@@ -21,6 +21,12 @@ class ApiKeyAuthFilter extends OncePerRequestFilter {
         this.registry = registry;
     }
 
+    /** Money writes run as async Callables (see AsyncConfig); the async re-dispatch must authenticate again. */
+    @Override
+    protected boolean shouldNotFilterAsyncDispatch() {
+        return false;
+    }
+
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
         return request.getRequestURI().startsWith(CallbackSignatureFilter.PATH_PREFIX);

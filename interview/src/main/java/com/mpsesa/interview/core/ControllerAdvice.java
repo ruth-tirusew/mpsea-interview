@@ -32,7 +32,7 @@ public class ControllerAdvice {
     }
 
     @ExceptionHandler({CannotGetJdbcConnectionException.class, DataAccessResourceFailureException.class,
-            QueryTimeoutException.class, CannotCreateTransactionException.class,
+            QueryTimeoutException.class, org.springframework.core.task.TaskRejectedException.class, CannotCreateTransactionException.class,
             org.springframework.dao.PessimisticLockingFailureException.class})
     ResponseEntity<ErrorResponse> unavailable(Exception e) {
         log.warn("database unavailable: {}", e.getClass().getSimpleName());

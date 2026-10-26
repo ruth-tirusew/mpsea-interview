@@ -1,5 +1,6 @@
-package com.mpsesa.interview.callbacks;
+package com.mpsesa.interview.callbacks.api;
 
+import com.mpsesa.interview.callbacks.CallbackService;
 import com.mpsesa.interview.callbacks.data.CallbackRequest;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;

@@ -1,5 +1,6 @@
-package com.mpsesa.interview.admin;
+package com.mpsesa.interview.admin.api;
 
+import com.mpsesa.interview.admin.ResetService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;

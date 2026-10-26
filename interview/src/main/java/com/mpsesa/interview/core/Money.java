@@ -1,5 +1,6 @@
 package com.mpsesa.interview.core;
 
+/** All amounts are integers in santim. 1 ETB = 100 santim is a fixed rule, not configuration. */
 public final class Money {
     public static final long SANTIM_PER_ETB = 100;
 

@@ -1,4 +1,4 @@
-package com.mpsesa.interview.accounts;
+package com.mpsesa.interview.accounts.api;
 
 import com.mpsesa.interview.accounts.data.WalletAccountDTO;
 import com.mpsesa.interview.accounts.data.WalletStatusRequest;
