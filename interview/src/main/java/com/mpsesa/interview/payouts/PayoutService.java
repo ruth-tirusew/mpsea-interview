@@ -22,13 +22,8 @@ import java.util.UUID;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-/**
- * Money side of a payout. Lock order is always payout row, then wallet row. Every method is one short
- * transaction; the bank is never called from here, so no DB connection is held across a bank call.
- */
 @Service
 public class PayoutService {
-    /** What the worker needs to talk to the bank. */
     public record SubmitData(String payoutId, String bankAccount, long amount) {
     }
 
@@ -44,7 +39,6 @@ public class PayoutService {
         this.locks = locks;
     }
 
-    /** 5.4: reserve and record. Returns immediately; the worker talks to the bank. */
     @Transactional(noRollbackFor = ApiException.class)
     public PayoutAccepted create(PayoutRequest req) {
         locks.boundWaits();
