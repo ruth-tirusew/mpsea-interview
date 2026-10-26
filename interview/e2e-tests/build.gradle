@@ -17,6 +17,7 @@ dependencies {
 	testImplementation 'org.junit.jupiter:junit-jupiter'
 	testImplementation 'com.fasterxml.jackson.core:jackson-databind:2.18.2'
 	testImplementation 'org.assertj:assertj-core:3.27.3'
+	testImplementation 'org.awaitility:awaitility:4.2.2'
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
@@ -25,6 +26,9 @@ tasks.named('test') {
 	useJUnitPlatform()
 	systemProperty 'wallet.urls', System.getProperty('wallet.urls', 'http://localhost:8081,http://localhost:8082')
 	systemProperty 'bank.url', System.getProperty('bank.url', 'http://localhost:9090')
+	systemProperty 'wallet.api-key', System.getProperty('wallet.api-key', 'e2e-user-key')
+	systemProperty 'wallet.admin-api-key', System.getProperty('wallet.admin-api-key', 'e2e-admin-key')
+	systemProperty 'bank.callback-secret', System.getProperty('bank.callback-secret', 'e2e-callback-secret')
 	outputs.upToDateWhen { false }
 	testLogging { events 'failed'; exceptionFormat 'full' }
 }
