@@ -1,1 +1,2 @@
 rootProject.name = 'interview'
+include 'fake-bank', 'e2e-tests'

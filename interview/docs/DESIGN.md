@@ -1,124 +1,34 @@
 # DESIGN
 
+## Decisions the spec left open
+- **Concurrent request with the same Idempotency-Key** (III): the duplicate waits (blocked on the unique index, max 1.5 s), then returns the stored response; if the original is still running after 1.5 s it returns **409 REQUEST_IN_PROGRESS**.
+- **Business errors are stored under the key too**, so replays are byte-identical. Unexpected failures roll back and store nothing.
+- **Reversal** needs no Idempotency-Key (the spec doesn't ask); it is safe to repeat anyway (409 ALREADY_REVERSED).
+- **Isolation level:** READ COMMITTED. Correctness comes from explicit row locks (`FOR UPDATE`, ascending id order) and unique constraints, not from serialisable retries.
+- **Idempotency mechanism:** Postgres table `idempotency_keys`; `INSERT .. ON CONFLICT DO NOTHING` inside the business transaction, response stored in the same commit, 24 h retention, hourly purge.
+- **Payout internal states:** RESERVED, SUBMITTING, SUBMITTED, UNKNOWN, SUCCEEDED, FAILED. Public: PENDING / SUCCEEDED / FAILED.
+- **Bank NOT_FOUND on a status query** means "resubmit", never "failed" (the bank dedupes on payout_id).
+- **Fake bank "accept rate"** is the remainder after reject and no-response rates.
+- Lock waits are capped by `SET LOCAL lock_timeout=1500ms` because Postgres ignores Hibernate's lock-timeout hint.
+- **Authentication (beyond the spec):** Spring Security, stateless. `X-API-Key` for every API, an admin key for freeze/unfreeze and `/mpesa/internal/**`, and an HMAC signature on bank callbacks (the fake bank signs them). Keys come from env vars with no defaults. This is an addition the paper does not require; the e2e stack supplies the keys. Raise with the interviewer whether the real bank can sign.
+- Optional APIs 5.6 and 5.7 are not built (see Q3).
 
-| Question | Decision | Status |
-|---|---|---|
-| Idempotency mechanism | Postgres `idempotency_keys`; `INSERT ... ON CONFLICT DO NOTHING` is the claim (1 row = we own the key, 0 = someone else does) | Committed |
-| Concurrent same-key request | Return 409 `REQUEST_IN_PROGRESS` immediately; no thread is parked waiting. A bounded wait is a Phase 2 option | Committed (error code, claim); service logic in progress |
-| Same key, different body | 409 `IDEMPOTENCY_CONFLICT`, detected by `request_hash` | Committed (column, error code) |
-| Transaction isolation | `READ COMMITTED` plus explicit row locks. Locks give the correctness; higher isolation would only add serialization retries | Decided |
-| Lock waits | `SET LOCAL lock_timeout = '1500ms'` via `DbLocks.boundWaits()` so a contended row fails fast instead of hanging a request | Committed |
-| Ledger model | Balance-row model: `wallets.balance/reserved` are the source of truth, `ledger_entries` is an append-only audit trail written in the same tx. Event sourcing is the Phase 2 direction (see below) | Decided |
+## Q1 Every wait
+1. **Tomcat threads** (50/instance): excess requests queue in the connector; each request is bounded by the items below.
+2. **Hikari pool** (10/instance): max 2 s (`connection-timeout`), then 503.
+3. **Wallet / transfer / payout row locks**: max 1.5 s (`lock_timeout`), then 503 (or 409 for idempotency).
+4. **Idempotency key insert** blocked by an in-flight twin: max 1.5 s, then 409 REQUEST_IN_PROGRESS.
+5. **Bank calls** (worker pool of 32 threads/instance, no DB connection held): hard 8 s client timeout, never on a request thread.
+6. **Worker semaphore**: the poll loop only claims as many rows as there are free worker slots, so it never blocks.
+7. **Callback bank retries** are the bank's: our handler does two short statements, bounded by 3.
+8. **Fake bank** hang is 60 s by design, but only the caller's own 8 s timeout waits on it.
+No `Thread.sleep` in the service; polling uses `@Scheduled(fixedDelay)`.
 
-## Principles
+## Q2 Database restart
+Between reservation and the bank's answer the payout row (state RESERVED/SUBMITTING) and the reservation were committed together, so they survive the restart. Steps: (1) the in-flight bank call finishes or times out; (2) our write of the result fails (connection lost), the transaction rolls back, state stays SUBMITTING and reserved stays reserved; (3) requests meanwhile get 503 SERVICE_UNAVAILABLE (pool reconnects, Hikari validates connections); (4) the worker's poll fails and logs; (5) when the DB is back the lease (20 s) expires and the payout is claimed again; (6) SUBMITTING means the outcome may exist, so we ask the bank (GET) first: SUCCEEDED applies debit + release + ledger once; FAILED/REJECTED releases; IN_PROGRESS waits; NOT_FOUND resubmits (idempotent). A callback that arrived while the DB was down gets 503 and the bank retries it; a duplicate is absorbed by `event_id`. Money cannot be lost or doubled: the reservation is a committed row, and only the single locked `applyFinal` moves it.
 
-- **The database enforces the money invariants, not only the code.** A bug in a service must not be able to create negative or double-spent money.
-- **Duplicates and retries are harmless by construction.** Idempotency keys for client requests, `event_id` for bank callbacks, conditional updates for state changes.
-- **No bank call, and no wait on the idempotency claim, while holding a DB connection** (pool is 10 per instance).
-- **Lock order is always ascending `wallet_id`**, which rules out deadlock between opposite transfers.
-- **`available` is always `balance - reserved`, computed in SQL**, never cached.
-- **Every state change on `payouts` is a conditional update** (`WHERE state = ...`), so replays and races are no-ops.
-- **Never guess an unknown bank result.** Resolve it or retry with the same `payout_id`; release funds only on a confirmed failure.
-
-## Failure modes and how this design answers them
-
-Source list: `FAILURE_MODES.md`. Each item is mapped to a mechanism and its status.
-
-| # | Failure mode | Answer | Status |
-|---|---|---|---|
-| 1 | We call the third party (bank) and get no reply | The outcome is **unknown**, not failed. Funds stay reserved and the payout moves to `UNKNOWN`. We never release on a timeout. Resolution is by `GET /bank/payouts/{id}` or by resubmitting with the same `payout_id`, which the bank treats as idempotent. Funds are released only on a confirmed `FAILED`/`REJECTED`/`NOT_FOUND`. The bank is never called inside a DB tx, so a hang cannot hold connections or locks | Schema and `UNKNOWN` handling in progress |
-| 2 | Race conditions from repeated client retries | Three layers. (a) Idempotency key: the `ON CONFLICT DO NOTHING` claim lets exactly one request run; a replay gets the stored response; a changed body gets 409 `IDEMPOTENCY_CONFLICT`; an in-flight duplicate gets 409 `REQUEST_IN_PROGRESS`. (b) Row locks in ascending `wallet_id` order serialise balance changes and avoid deadlock. (c) DB constraints are the last line: `UNIQUE(transfer_id)` on reversals, `CHECK` on balances | Claim, constraints, `DbLocks` committed; service flow in progress |
-| 3 | Silent webhook/callback failures | A callback can be lost, duplicated, early or contradictory. Lost: the worker does not depend on callbacks; it polls the bank for payouts stuck in `UNKNOWN` or submitted past a deadline, and callbacks are only a fast path. Duplicate: `bank_callbacks.event_id` PK, checked after locking the payout. Early: the payout row exists before the bank call, so there is always something to apply to. Unknown payout: 404 so the bank retries. Contradicting final status: payout flagged `conflict = true` and not overwritten. Silence is made visible by metrics (oldest `UNKNOWN` age, conflict count) | Dedup and locking committed; polling and metrics in progress / Phase 2a |
-| 4 | Floating-point differences | No floats anywhere. Amounts are `bigint` santim, conversion uses `multiplyExact`, and display formatting is integer division only. Limits are enforced in code and by `CHECK` | Committed |
-| 5 | Reconciliation or batch job lags or fails | Correctness never depends on these jobs, they only detect drift. Payout work uses a lease (`lease_until`) and `FOR UPDATE SKIP LOCKED`, so a crashed worker's rows are picked up by another instance after the lease expires. Each step is a conditional update, so re-running a job is a no-op. Bulk batches keep `rows_hash` and per-row `result`, so a restarted batch resumes instead of repeating rows. The reconciliation job is read-only: it compares `SUM(balance)` with the ledger and our `SUCCEEDED` payouts with the bank's paid total, and alerts on drift instead of auto-correcting. Lag is bounded by the sweeper's backoff and max-attempts escalation to manual review | Schema committed; worker in progress; reconciliation and sweeper are Phase 2a |
-
-Residual risk we accept in Phase 1: if the bank never answers and never has the payout, the payout stays `UNKNOWN` with funds reserved until an operator or the sweeper escalates it. That is deliberate; guessing could pay out twice or release funds that were sent.
-
-## Phase 1: what is built
-
-### Committed
-
-| Area | What exists | Why it is built this way |
-|---|---|---|
-| Money | `Money` helpers, amounts as `bigint` santim, limits 1 to 5,000,000 | No float error; `multiplyExact` fails loudly on overflow. Limits are checked in code and again by a DB `CHECK` |
-| Wallet schema | `wallets` with `CHECK (balance >= 0)`, `CHECK (reserved >= 0)`, `CHECK (reserved <= balance)`, status `ACTIVE`/`FROZEN` | Invariants live in the DB |
-| Transfer and reversal schema | `transfers` (sequence ids), `reversals` with `UNIQUE(transfer_id)` | The unique key is the arbiter: a transfer can be reversed at most once. The loser gets 409 `ALREADY_REVERSED` |
-| Ledger schema | `ledger_entries` (amount, `balance_after`), indexed `(wallet_id, entry_id DESC)` | Append-only audit trail with fast statement reads |
-| Payout schema | `payouts` with `state`, `attempts`, `next_attempt_at`, `lease_owner`, `lease_until`, `conflict`; partial index on non-terminal rows | Supports a leased worker and keeps the poller index small |
-| Bulk payout schema | `b2c_batches`, `b2c_rows` with `rows_hash` | Replayed batch is detectable |
-| Wallet read path | `WalletAccount`, `WalletAccountRepository`, `WalletAccountReadService`, `WalletController` | Read-only view of a wallet |
-| Error contract | `ErrorCode`, `ApiException`, `ControllerAdvice`, `ErrorResponse` | One error shape, one HTTP status per code (400, 404, 409, 422, 503, 500). No SQL or stack text leaks |
-| Idempotency store | `IdempotencyKey` entity; repository with `claim`, `complete`, `deleteExpired`; states `IN_PROGRESS` / `DONE` | The PK insert is the claim, so two concurrent requests cannot both win. `DONE` stores status and body for replay |
-| Callback ingestion | `BankCallback`, `BankCallbackRepository`, `CallbackController`, `CallbackService` | See flow below |
-| Utilities | `DbLocks`, `Times.iso` | Bounded lock waits; UTC millisecond timestamps in API output |
-| Build | Gradle dependencies, `e2e-tests` and `fake-bank` modules, Flyway `V1__schema.sql` | |
-
-**Callback flow (`CallbackService.handle`)**
-
-1. Bound the lock wait to 1.5 s.
-2. Lock the payout row (`lockById`). Unknown payout gives 404 so the bank retries. This serialises concurrent callbacks for one payout.
-3. `insertIfAbsent(event_id)`. A return of 0 means the event was already processed, so return quietly.
-4. Otherwise call `PayoutService.applyFinal` once.
-
-The payout is locked before the dedup insert, so two simultaneous duplicates cannot both apply the result.
-
-> Note: `CallbackService` in `HEAD` references `PayoutService`, `PayoutRepository`, `Payout` and `PayoutState`, which are not committed yet. `HEAD` alone does not compile.
-
-### In progress (working tree, uncommitted)
-
-| Area | Mechanism |
-|---|---|
-| Idempotency service | `IdempotencyService` and `StoredResponse` (staged). Claim, replay stored response, conflict on hash mismatch |
-| Transfer (5.1) | One tx, lock both wallet rows in ascending `wallet_id` order (`FOR UPDATE`), check `ACTIVE` and `available` after the lock |
-| Reversal (5.2) | Same lock order; `UNIQUE(transfer_id)` decides the winner; the credited side may be `FROZEN` |
-| Wallet freeze (5.3) | `WalletAccountStatusService`, `WalletStatusRequest/Response`. Takes the same row lock, so any later debit sees `FROZEN` |
-| Ledger | `ledger/` package: entries written in the same tx as the balance change |
-| Payout (5.4) | Tx 1 reserves funds and inserts the payout as `RESERVED`; returns 202 within 500 ms. The bank is never called inside a DB tx |
-| Payout worker | `@Scheduled` poller claims rows with `FOR UPDATE SKIP LOCKED` and `lease_until`. A dead instance's lease expires and another takes over |
-| Unknown bank result | Timeout or 504 leaves the payout `UNKNOWN`. Resolve via `GET /bank/payouts/{id}` or resubmit with the same `payout_id` (bank is idempotent) |
-| Bank client and fake bank | `bank/` package; `fake-bank` runs separately on 9090 with configurable failure rates |
-| Admin / reset | `admin/` package, `/internal/reset` for tests |
-| Tests | `e2e-tests` for scenarios S1.1 to S5.2, run through docker-compose against both instances, using latches or `CompletableFuture` instead of `Thread.sleep` |
-
-### Planned
-
-- Mark every line in `FAILURE_MODES.md` as prevented (with how) or explicitly "not handled".
-- Commit the untracked packages in small steps so `HEAD` compiles at every commit.
-
-## Phase 2
-
-### 2a. Hardening
-- **Reconciliation job**: compare `SUM(balance)` with the ledger, and our `SUCCEEDED` payouts with the bank's paid total. Alert on drift; do not silently fix it.
-- **Stuck-payout sweeper** with exponential backoff and escalation to a manual-review state after max attempts.
-- **Bounded wait** on an in-flight idempotency key instead of an immediate 409.
-- **Idempotency expiry** job (24 h), using the existing `deleteExpired`.
-- **Metrics**: pool usage, payout counts by state, age of the oldest `UNKNOWN`, callback conflicts.
-
-### 2b. Event sourcing (possible next iteration)
-
-#### Why it fits this system
-
-The current model already behaves like a partial event log: `ledger_entries` is append-only, reversals are compensations rather than edits, and bank callbacks are stored by `event_id`. The remaining problem is that balances are mutable state kept beside the log, so the two can drift, and every guarantee depends on holding a row lock. Making the log the source of truth removes that duplication.
-
-Benefits specific to this domain:
-
-- **One truth, no drift.** Balance is derived from events, so "does the ledger match the balance?" stops being a reconciliation job and becomes a replay check.
-- **Audit and time travel.** Rebuild any wallet at any past point, which is what disputes and regulators ask for.
-- **Payouts become explicit workflows.** Each step (reserved, submitted, bank unknown, settled, released) is an event. After a crash, recovery is replay plus resume from the last event, rather than inferring intent from a `state` column and a lease.
-- **Callbacks get a full record.** Out-of-order and contradicting bank callbacks are kept as raw events instead of only setting `conflict = true`.
-- **Reversal is already a compensating event**, so the model matches today's behaviour.
-- **Cheaper concurrency control under low contention** (optimistic append instead of `FOR UPDATE`).
-
-#### Sketch
-
-| Piece | Design |
-|---|---|
-| Event store | `events(stream_id, version, type, payload, created_at)` with `UNIQUE(stream_id, version)`; one stream per wallet |
-| Optimistic concurrency | Writer appends at `expected_version`; a unique violation means retry. Replaces `FOR UPDATE`. Worse on hot wallets (for example M001), so keep the lock path for those or batch writes |
-| Events | `WalletCredited`, `WalletDebited`, `FundsReserved`, `ReservationReleased`, `PayoutSettled`, `WalletFrozen`, `TransferReversed` |
-| Projections (CQRS) | `wallets` becomes a projection of balance, reserved and status. Update it in the same tx (strongly consistent) or with an async projector. Wallet read (5.3) must stay consistent, so the same-tx projection is the safe default |
-| Snapshots | Store balance at version N so replaying a long stream (1M entries, S7.2) stays cheap |
-| Payout saga | `PayoutRequested → FundsReserved → SubmittedToBank → (BankAccepted / BankUnknown) → Settled / Released` |
-| Transactional outbox | Events and the "call the bank" intent are written in one tx; a relay publishes them. At-least-once delivery with exactly-once effect, no broker required |
-| Callbacks as events | `BankCallbackReceived` stored raw (deduped by `event_id`), then applied by a handler |
-| Replay / audit | Rebuild any wallet at any time and re-derive balances to verify the projection |
+## Q3 What I left out
+- **5.6 B2C disbursements**: accept the batch (rows + hash in tables, 202), then a DB-leased worker applies rows in order in chunked transactions (one `lockById` on the source wallet per chunk, ~200 rows) so 5.1 on the source wallet is never blocked longer than one chunk. Hard parts: ordered application with duplicate row_id detection, the `batch_id` replay across instances (409 on different rows via a stored hash), and the 60 s budget for 5,000 rows while keeping 5.1 p95 under 300 ms on the same hot source wallet.
+- **5.7 Statement**: keyset pagination on `ledger_entries(wallet_id, entry_id DESC)` (index exists), cursor = last entry_id. Hard parts: `bigserial` ids can commit out of order under concurrency, so "every entry that existed at first page" needs a high-water mark in the cursor (a snapshot id taken from `pg_current_snapshot()`/max committed id), and the balance chain needs entries inserted under the wallet lock so order matches commit order (it does, as inserts happen inside the locked section).
+- **Tests S6.x and S7.x** follow 5.6/5.7.
+- **Payout finality at 2 min**: if the bank stays IN_PROGRESS or silent for the whole window the payout stays PENDING (money stays reserved). I chose safety over a guess; a production system would raise an alert at 110 s.
